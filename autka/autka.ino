@@ -1,6 +1,6 @@
 #include <esp_now.h>
 #include <WiFi.h>
-
+#include "telemetry.h"
 // Definicja pinów mostka H (IN1-IN4)
 const int IN1 = 15; // Lewy silnik w przód
 const int IN2 = 2;  // Lewy silnik w tył
@@ -19,9 +19,8 @@ struct_message incomingJoy;
 // ZMIANA SYGNATURY DLA ESP32 CORE 3.x:
 // Pierwszym parametrem musi być wskaźnik na strukturę 'esp_now_recv_info'
 // ===================================================================
-void OnDataRecv(const esp_now_recv_info *recv_info, const uint8_t *incomingData, int len) {
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
   memcpy(&incomingJoy, incomingData, sizeof(incomingJoy));
-  
   // ===================================================================
   // DOPASOWANIE POZIOMEGO JOY-CONA:
   // Ponieważ Joy-Con trzymany jest poziomo, osie X i Y są obrócone.
@@ -71,7 +70,7 @@ void setup() {
 
   // Rejestracja funkcji odbiorczej (teraz przejdzie kompilację pomyślnie)
   esp_now_register_recv_cb(OnDataRecv);
-  
+  setupTelemetryAndBatteryMonitoring();
   Serial.println("Odbiornik ESP-NOW gotowy...");
 }
 
@@ -81,6 +80,10 @@ void loop() {
 
 // Funkcja pomocnicza do bezpośredniego sterowania mostkiem H (IN1-IN4)
 void controlMotors(int left, int right) {
+  if (stopMotors) {
+    left = 0;
+    right = 0;
+  }
   // LEWY SILNIK
   if (left >= 0) {
     analogWrite(IN1, left);
