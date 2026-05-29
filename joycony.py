@@ -1,22 +1,122 @@
+from pathlib import Path
+import sys
+import time
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
+_VENV_SITE_PACKAGES = _PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
+if _VENV_SITE_PACKAGES.exists():
+    sys.path.insert(0, str(_VENV_SITE_PACKAGES))
+
 import pygame
 import serial
-import time
-import sys
+
+
+def parse_telemetry_line(line):
+    line = line.strip().strip(";")
+    if not line:
+        return None
+
+    data = {}
+    for chunk in line.split(";"):
+        if ":" not in chunk:
+            continue
+        key, value = chunk.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if key in ("batVol", "batPct"):
+            try:
+                data[key] = float(value)
+            except ValueError:
+                data[key] = value
+        elif key == "temp":
+            try:
+                data[key] = int(float(value))
+            except ValueError:
+                data[key] = value
+        else:
+            data[key] = value
+
+    if "mac" not in data:
+        return None
+    return data
+
+
+def clear_terminal():
+    if sys.stdout.isatty():
+        sys.stdout.write("\033[2J\033[H")
+
+
+def format_telemetry_block(telemetry_by_mac, recent_invalid_lines):
+    lines = []
+    lines.append("Incoming telemetry")
+    lines.append("MAC                | batVol | batPct | temp")
+    lines.append("-------------------+--------+--------+------")
+
+    if telemetry_by_mac:
+        for mac, data in telemetry_by_mac.items():
+            bat_vol = data.get("batVol", "-")
+            bat_pct = data.get("batPct", "-")
+            temp = data.get("temp", "-")
+            lines.append(
+                f"{mac:17} | {bat_vol:6.2f} | {bat_pct:6.2f} | {temp:4}"
+                if isinstance(bat_vol, (int, float)) and isinstance(bat_pct, (int, float))
+                else f"{mac:17} | {bat_vol!s:6} | {bat_pct!s:6} | {temp!s:4}"
+            )
+    else:
+        lines.append("Waiting for telemetry...")
+
+    if recent_invalid_lines:
+        lines.append("")
+        lines.append("Unreadable lines")
+        for entry in recent_invalid_lines[-3:]:
+            lines.append(f"- {entry}")
+
+    return lines
+
+
+def render_dashboard(serial_port, joystick_count, payload, axes_debug_str, telemetry_by_mac, recent_invalid_lines):
+    clear_terminal()
+    lines = [
+        "Joycony live monitor",
+        f"Serial: {'connected on ' + serial_port_label if serial_port and serial_port.is_open else 'demo mode'}",
+        f"Controllers: {joystick_count}",
+        f"Outgoing: {payload.strip()}",
+    ]
+    if axes_debug_str:
+        lines.append(f"Debug:{axes_debug_str}")
+    lines.append("")
+    lines.extend(format_telemetry_block(telemetry_by_mac, recent_invalid_lines))
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 # ==========================================
 # KONFIGURACJA PORTU SZEREGOWEGO
 # Zmień poniższą ścieżkę na swój rzeczywisty port ESP32!
 # ==========================================
-SERIAL_PORT = '/dev/cu.usbmodem101'  
+SERIAL_PORT = r'\\.\COM10'
 BAUD_RATE = 115200
 
-try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
-    print(f"Połączono z ESP32 na porcie {SERIAL_PORT}")
-except Exception as e:
-    print(f"Nie udało się otworzyć portu szeregowego: {e}")
+ser = None
+serial_port_label = SERIAL_PORT
+last_serial_error = None
+
+if not hasattr(serial, "Serial"):
+    raise RuntimeError(
+        "Loaded the wrong 'serial' package. Install 'pyserial' in the workspace venv or run the script with the venv Python."
+    )
+
+for candidate_port in (SERIAL_PORT, 'COM10'):
+    try:
+        ser = serial.Serial(candidate_port, BAUD_RATE, timeout=0.1)
+        serial_port_label = candidate_port
+        print(f"Połączono z ESP32 na porcie {candidate_port}")
+        break
+    except Exception as e:
+        last_serial_error = e
+
+if ser is None:
+    print(f"Nie udało się otworzyć portu szeregowego: {last_serial_error}")
     print("Uruchamiam w trybie demonstracyjnym (bez wysyłania do ESP32).")
-    ser = None
 
 # Inicjalizacja Pygame
 pygame.init()
@@ -26,6 +126,11 @@ print("\nSzukam podłączonych kontrolerów...")
 clock = pygame.time.Clock()
 
 try:
+    telemetry_by_mac = {}
+    recent_invalid_lines = []
+    last_render_time = 0.0
+    render_interval = 0.2
+
     while True:
         pygame.event.pump()
         
@@ -85,10 +190,23 @@ try:
 
         # Budujemy ramkę danych dla ESP32: "x1,y1,x2,y2\n"
         payload = f"{x1},{y1},{x2},{y2}\n"
-        
-        # Wypisujemy w konsoli Maca wysyłany pakiet oraz stan wszystkich osi
-        sys.stdout.write(f"\rWysyłam do ESP: {payload.strip()} (Wykryto urządzeń: {joystick_count}){axes_debug_str}      ")
-        sys.stdout.flush()
+
+        if ser and ser.is_open:
+            try:
+                while ser.in_waiting:
+                    incoming_line = ser.readline().decode("utf-8", errors="ignore").strip()
+                    parsed = parse_telemetry_line(incoming_line)
+                    if parsed:
+                        telemetry_by_mac[parsed["mac"]] = parsed
+                        recent_invalid_lines.clear()
+                    elif incoming_line:
+                        recent_invalid_lines.append(incoming_line)
+                        if len(recent_invalid_lines) > 5:
+                            recent_invalid_lines.pop(0)
+            except Exception as e:
+                recent_invalid_lines.append(f"Serial read error: {e}")
+                if len(recent_invalid_lines) > 5:
+                    recent_invalid_lines.pop(0)
         
         # Wysyłanie przez port szeregowy
         if ser and ser.is_open:
@@ -97,6 +215,11 @@ try:
             except Exception as e:
                 print(f"\nBłąd transmisji: {e}")
                 break
+
+        current_time = time.time()
+        if current_time - last_render_time >= render_interval:
+            render_dashboard(ser, joystick_count, payload, axes_debug_str, telemetry_by_mac, recent_invalid_lines)
+            last_render_time = current_time
                 
         # 50 Hz (próbkowanie co 20 ms)
         clock.tick(20)

@@ -36,10 +36,61 @@ void sendStopCommand() {
   esp_now_send(mac_autko2, (uint8_t *) &joy2_data, sizeof(joy2_data));
 }
 
+
+float batteryVoltage = 0;
+
+void OnDataRecv(const esp_now_recv_info *receve_info, const uint8_t *incomingData, int len) {
+  char msg[len + 1];
+  memcpy(msg, incomingData, len);
+  // 1. Get the sender's MAC address array
+  const uint8_t *senderMac = receve_info->src_addr;
+  
+  // 2. Format and print the MAC address
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+           senderMac[0], senderMac[1], senderMac[2], 
+           senderMac[3], senderMac[4], senderMac[5]);
+  // 3. Null-terminate to make it a valid C-string
+  msg[len] = '\0';
+
+  // 4. Convert to Arduino String
+  String data = String(msg);
+
+  // Debug
+  Serial.println(data+"mac:"+macStr+";");
+/*
+  // -----------------------------
+  // SPLIT BY CHARACTER
+  // -----------------------------
+  char delimiter = ';';
+
+  int index = 0;
+  String parts[10]; // adjust size if needed
+
+  for (int i = 0; i < data.length(); i++) {
+    if (data[i] == delimiter) {
+      index++;
+    } else {
+      parts[index] += data[i];
+    }
+  }
+
+  // -----------------------------
+  // CHECK FIRST LETTERS
+  // -----------------------------
+  if (data.startsWith("batVol:")) 
+
+    data.replace("batVol:", "");
+    batteryVoltage = data.toFloat();  }
+
+  if (data[0] == 'A') {
+    Serial.println("First letter is A");
+  }*/
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.setTimeout(2); 
-
   pinMode(ESTOP_PIN, INPUT_PULLUP);
   pinMode(BLUE_BTN_PIN, INPUT_PULLUP);
 
@@ -64,6 +115,11 @@ void setup() {
   peerInfo2.ifidx = WIFI_IF_STA;
   esp_now_add_peer(&peerInfo2);
   
+
+  esp_now_register_recv_cb(OnDataRecv);
+
+
+
   neopixelWrite(RGB_BUILTIN, 0, 0, 0);
   delay(2000); 
   Serial.println("\n--- SYSTEM HOST S3 URUCHOMIONY ---");
